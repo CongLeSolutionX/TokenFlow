@@ -51,11 +51,7 @@ def isinstance_str(x: object, cls_name: str):
     Useful for patching!
     """
 
-    for _cls in x.__class__.__mro__:
-        if _cls.__name__ == cls_name:
-            return True
-    
-    return False
+    return any(_cls.__name__ == cls_name for _cls in x.__class__.__mro__)
 
 
 def batch_cosine_sim(x, y):
@@ -65,8 +61,7 @@ def batch_cosine_sim(x, y):
         y = torch.cat(y, dim=0)
     x = x / x.norm(dim=-1, keepdim=True)
     y = y / y.norm(dim=-1, keepdim=True)
-    similarity = x @ y.T
-    return similarity
+    return x @ y.T
 
 
 def load_imgs(data_path, n_frames, device='cuda', pil=False):
