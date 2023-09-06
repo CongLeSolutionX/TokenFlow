@@ -67,7 +67,7 @@ class TokenFlow(nn.Module):
         pnp_inversion_prompt = self.get_pnp_inversion_prompt()
         self.pnp_guidance_embeds = self.get_text_embeds(pnp_inversion_prompt, pnp_inversion_prompt).chunk(2)[0]
     
-    @torch.no_grad()   
+    @torch.no_grad()
     def prepare_depth_maps(self, model_type='DPT_Large', device='cuda'):
         depth_maps = []
         midas = torch.hub.load("intel-isl/MiDaS", model_type)
@@ -76,7 +76,7 @@ class TokenFlow(nn.Module):
 
         midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
 
-        if model_type == "DPT_Large" or model_type == "DPT_Hybrid":
+        if model_type in ["DPT_Large", "DPT_Hybrid"]:
             transform = midas_transforms.dpt_transform
         else:
             transform = midas_transforms.small_transform
@@ -84,10 +84,10 @@ class TokenFlow(nn.Module):
         for i in range(len(self.paths)):
             img = cv2.imread(self.paths[i])
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
+
             latent_h = img.shape[0] // 8
             latent_w = img.shape[1] // 8
-            
+
             input_batch = transform(img).to(device)
             prediction = midas(input_batch)
 
@@ -149,15 +149,15 @@ class TokenFlow(nn.Module):
             posterior = self.vae.encode(imgs[i:i + batch_size]).latent_dist
             latent = posterior.mean if deterministic else posterior.sample()
             latents.append(latent * 0.18215)
-        latents = torch.cat(latents)
-        return latents
+        return torch.cat(latents)
 
     @torch.no_grad()
     def decode_latents(self, latents, batch_size=VAE_BATCH_SIZE):
         latents = 1 / 0.18215 * latents
-        imgs = []
-        for i in range(0, len(latents), batch_size):
-            imgs.append(self.vae.decode(latents[i:i + batch_size]).sample)
+        imgs = [
+            self.vae.decode(latents[i : i + batch_size]).sample
+            for i in range(0, len(latents), batch_size)
+        ]
         imgs = torch.cat(imgs)
         imgs = (imgs / 2 + 0.5).clamp(0, 1)
         return imgs
@@ -184,13 +184,17 @@ class TokenFlow(nn.Module):
         return paths, frames, latents, eps
 
     def get_ddim_eps(self, latent, indices):
-        noisest = max([int(x.split('_')[-1].split('.')[0]) for x in glob.glob(os.path.join(self.latents_path, f'noisy_latents_*.pt'))])
+        noisest = max(
+            int(x.split('_')[-1].split('.')[0])
+            for x in glob.glob(
+                os.path.join(self.latents_path, 'noisy_latents_*.pt')
+            )
+        )
         latents_path = os.path.join(self.latents_path, f'noisy_latents_{noisest}.pt')
         noisy_latent = torch.load(latents_path)[indices].to(self.device)
         alpha_prod_T = self.scheduler.alphas_cumprod[noisest]
         mu_T, sigma_T = alpha_prod_T ** 0.5, (1 - alpha_prod_T) ** 0.5
-        eps = (noisy_latent - mu_T * latent) / sigma_T
-        return eps
+        return (noisy_latent - mu_T * latent) / sigma_T
 
     @torch.no_grad()
     def denoise_step(self, x, t, indices):
@@ -213,24 +217,21 @@ class TokenFlow(nn.Module):
         _, noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
         noise_pred = noise_pred_uncond + self.config["guidance_scale"] * (noise_pred_cond - noise_pred_uncond)
 
-        # compute the denoising step with the reference model
-        denoised_latent = self.scheduler.step(noise_pred, t, x)['prev_sample']
-        return denoised_latent
+        return self.scheduler.step(noise_pred, t, x)['prev_sample']
     
     @torch.autocast(dtype=torch.float16, device_type='cuda')
     def batched_denoise_step(self, x, t, indices):
         batch_size = self.config["batch_size"]
         denoised_latents = []
         pivotal_idx = torch.randint(batch_size, (len(x)//batch_size,)) + torch.arange(0,len(x),batch_size) 
-            
+
         register_pivotal(self, True)
         self.denoise_step(x[pivotal_idx], t, indices[pivotal_idx])
         register_pivotal(self, False)
         for i, b in enumerate(range(0, len(x), batch_size)):
             register_batch_idx(self, i)
             denoised_latents.append(self.denoise_step(x[b:b + batch_size], t, indices[b:b + batch_size]))
-        denoised_latents = torch.cat(denoised_latents)
-        return denoised_latents
+        return torch.cat(denoised_latents)
 
     def init_method(self, conv_injection_t, qk_injection_t):
         self.qk_injection_timesteps = self.scheduler.timesteps[:qk_injection_t] if qk_injection_t >= 0 else []
@@ -263,9 +264,9 @@ class TokenFlow(nn.Module):
 
     def sample_loop(self, x, indices):
         os.makedirs(f'{self.config["output_path"]}/img_ode', exist_ok=True)
-        for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="Sampling")):
-                x = self.batched_denoise_step(x, t, indices)
-        
+        for t in tqdm(self.scheduler.timesteps, desc="Sampling"):
+            x = self.batched_denoise_step(x, t, indices)
+
         decoded_latents = self.decode_latents(x)
         for i in range(len(decoded_latents)):
             T.ToPILImage()(decoded_latents[i]).save(f'{self.config["output_path"]}/img_ode/%05d.png' % i)

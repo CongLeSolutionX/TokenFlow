@@ -32,7 +32,7 @@ class Preprocess(nn.Module):
         self.sd_version = opt.sd_version
         self.use_depth = False
 
-        print(f'[INFO] loading stable diffusion...')
+        print('[INFO] loading stable diffusion...')
         if hf_key is not None:
             print(f'[INFO] using hugging face custom model key: {hf_key}')
             model_key = hf_key
@@ -40,7 +40,7 @@ class Preprocess(nn.Module):
             model_key = "stabilityai/stable-diffusion-2-1-base"
         elif self.sd_version == '2.0':
             model_key = "stabilityai/stable-diffusion-2-base"
-        elif self.sd_version == '1.5' or self.sd_version == 'ControlNet':
+        elif self.sd_version in ['1.5', 'ControlNet']:
             model_key = "runwayml/stable-diffusion-v1-5"
         elif self.sd_version == 'depth':
             model_key = "stabilityai/stable-diffusion-2-depth"
@@ -56,7 +56,7 @@ class Preprocess(nn.Module):
         self.unet = UNet2DConditionModel.from_pretrained(model_key, subfolder="unet", revision="fp16",
                                                    torch_dtype=torch.float16).to(self.device)
         self.paths, self.frames, self.latents = self.get_data(opt.data_path, opt.n_frames)
-        
+
         if self.sd_version == 'ControlNet':
             from diffusers import ControlNetModel, StableDiffusionControlNetPipeline
             controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny", torch_dtype=torch.float16).to(self.device)
@@ -69,11 +69,11 @@ class Preprocess(nn.Module):
         elif self.sd_version == 'depth':
             self.depth_maps = self.prepare_depth_maps()
         self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
-        
+
         # self.unet.enable_xformers_memory_efficient_attention()
-        print(f'[INFO] loaded stable diffusion!')
+        print('[INFO] loaded stable diffusion!')
         
-    @torch.no_grad()   
+    @torch.no_grad()
     def prepare_depth_maps(self, model_type='DPT_Large', device='cuda'):
         depth_maps = []
         midas = torch.hub.load("intel-isl/MiDaS", model_type)
@@ -82,7 +82,7 @@ class Preprocess(nn.Module):
 
         midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
 
-        if model_type == "DPT_Large" or model_type == "DPT_Hybrid":
+        if model_type in ["DPT_Large", "DPT_Hybrid"]:
             transform = midas_transforms.dpt_transform
         else:
             transform = midas_transforms.small_transform
@@ -93,7 +93,7 @@ class Preprocess(nn.Module):
 
             latent_h = img.shape[0] // 8
             latent_w = img.shape[1] // 8
-            
+
             input_batch = transform(img).to(device)
             prediction = midas(input_batch)
 
@@ -113,18 +113,22 @@ class Preprocess(nn.Module):
     @torch.no_grad()
     def get_canny_cond(self):
         canny_cond = []
+        low_threshold = 100
+        high_threshold = 200
+
         for image in self.frames.cpu().permute(0, 2, 3, 1):
             image = np.uint8(np.array(255 * image))
-            low_threshold = 100
-            high_threshold = 200
-
             image = cv2.Canny(image, low_threshold, high_threshold)
             image = image[:, :, None]
             image = np.concatenate([image, image, image], axis=2)
             image = torch.from_numpy((image.astype(np.float32) / 255.0))
             canny_cond.append(image)
-        canny_cond = torch.stack(canny_cond).permute(0, 3, 1, 2).to(self.device).to(torch.float16)
-        return canny_cond
+        return (
+            torch.stack(canny_cond)
+            .permute(0, 3, 1, 2)
+            .to(self.device)
+            .to(torch.float16)
+        )
     
     def controlnet_pred(self, latent_model_input, t, text_embed_input, controlnet_cond):
         down_block_res_samples, mid_block_res_sample = self.controlnet(
@@ -135,9 +139,8 @@ class Preprocess(nn.Module):
             conditioning_scale=1,
             return_dict=False,
         )
-        
-        # apply the denoising network
-        noise_pred = self.unet(
+
+        return self.unet(
             latent_model_input,
             t,
             encoder_hidden_states=text_embed_input,
@@ -146,7 +149,6 @@ class Preprocess(nn.Module):
             mid_block_additional_residual=mid_block_res_sample,
             return_dict=False,
         )[0]
-        return noise_pred
     
     @torch.no_grad()
     def get_text_embeds(self, prompt, negative_prompt, device="cuda"):
@@ -178,8 +180,7 @@ class Preprocess(nn.Module):
             posterior = self.vae.encode(imgs[i:i + batch_size]).latent_dist
             latent = posterior.mean if deterministic else posterior.sample()
             latents.append(latent * 0.18215)
-        latents = torch.cat(latents)
-        return latents
+        return torch.cat(latents)
 
     def get_data(self, frames_path, n_frames):
         # load frames
@@ -278,10 +279,8 @@ class Preprocess(nn.Module):
                                          save_latents=True,
                                          timesteps_to_save=timesteps_to_save)
         latent_reconstruction = self.ddim_sample(inverted_x, cond, batch_size=batch_size)
-                                                 
-        rgb_reconstruction = self.decode_latents(latent_reconstruction)
 
-        return rgb_reconstruction
+        return self.decode_latents(latent_reconstruction)
 
 
 def prep(opt):
@@ -290,7 +289,7 @@ def prep(opt):
         model_key = "stabilityai/stable-diffusion-2-1-base"
     elif opt.sd_version == '2.0':
         model_key = "stabilityai/stable-diffusion-2-base"
-    elif opt.sd_version == '1.5' or opt.sd_version == 'ControlNet':
+    elif opt.sd_version in ['1.5', 'ControlNet']:
         model_key = "runwayml/stable-diffusion-v1-5"
     elif opt.sd_version == 'depth':
         model_key = "stabilityai/stable-diffusion-2-depth"
@@ -306,9 +305,9 @@ def prep(opt):
                              f'sd_{opt.sd_version}',
                              Path(opt.data_path).stem,
                              f'steps_{opt.steps}',
-                             f'nframes_{opt.n_frames}') 
-    os.makedirs(os.path.join(save_path, f'latents'), exist_ok=True)
-    add_dict_to_yaml_file(os.path.join(opt.save_dir, 'inversion_prompts.yaml'), Path(opt.data_path).stem, opt.inversion_prompt)    
+                             f'nframes_{opt.n_frames}')
+    os.makedirs(os.path.join(save_path, 'latents'), exist_ok=True)
+    add_dict_to_yaml_file(os.path.join(opt.save_dir, 'inversion_prompts.yaml'), Path(opt.data_path).stem, opt.inversion_prompt)
     # save inversion prompt in a txt file
     with open(os.path.join(save_path, 'inversion_prompt.txt'), 'w') as f:
         f.write(opt.inversion_prompt)
@@ -322,12 +321,12 @@ def prep(opt):
     )
 
 
-    if not os.path.isdir(os.path.join(save_path, f'frames')):
-        os.mkdir(os.path.join(save_path, f'frames'))
+    if not os.path.isdir(os.path.join(save_path, 'frames')):
+        os.mkdir(os.path.join(save_path, 'frames'))
     for i, frame in enumerate(recon_frames):
-        T.ToPILImage()(frame).save(os.path.join(save_path, f'frames', f'{i:05d}.png'))
+        T.ToPILImage()(frame).save(os.path.join(save_path, 'frames', f'{i:05d}.png'))
     frames = (recon_frames * 255).to(torch.uint8).cpu().permute(0, 2, 3, 1)
-    write_video(os.path.join(save_path, f'inverted.mp4'), frames, fps=10)
+    write_video(os.path.join(save_path, 'inverted.mp4'), frames, fps=10)
 
 
 if __name__ == "__main__":
